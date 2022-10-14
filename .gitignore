@@ -1,0 +1,12 @@
+**/saved_models/*
+**/segmentation/*
+*.mdb
+*.pt
+*.tar
+*.sh
+*.txt
+*.ipynb
+*.zip
+*.eps
+*.pdf
+**/sdk/*
