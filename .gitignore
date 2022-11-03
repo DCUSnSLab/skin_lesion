@@ -9,4 +9,5 @@
 *.zip
 *.eps
 *.pdf
+*.pth
 **/sdk/*

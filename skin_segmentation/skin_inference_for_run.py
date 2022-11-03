@@ -1,6 +1,5 @@
 import argparse
 import logging
-import os
 import pathlib
 import functools
 
@@ -9,12 +8,12 @@ import torch
 from torchvision import transforms
 
 
-from visualisation import draw_results
+from .visualisation import draw_results
 
 import torch
 import torch.nn as nn
-from fcn import FCNResNet101
-from bisenetv2 import BiSeNetV2
+from .fcn import FCNResNet101
+from .bisenetv2 import BiSeNetV2
 
 models = {
     'FCNResNet101': FCNResNet101,
@@ -75,7 +74,7 @@ class Skin_net:
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         assert self.device == 'cuda', "cuda가 안되는데요?, skin segmentation을 살펴보세요"
 
-        __model = ['./model_segmentation_skin_30.pth', './model_segmentation_realtime_skin_30.pth']
+        __model = ['pretrained/model_segmentation_skin_30.pth', 'pretrained/model_segmentation_realtime_skin_30.pth']
         __model_tpye = ['FCNResNet101','BiSeNetV2']
         self.model = torch.load(__model[num], map_location=self.device)
         self.model = load_model(models[__model_tpye[num]], self.model)

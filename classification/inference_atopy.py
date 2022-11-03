@@ -80,7 +80,7 @@ def classify_lesions(model,image):
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
-    img=Image.fromarray(image)
+    img = Image.fromarray(image).convert('RGB')
     inputs = data_transforms(img)
     inputs = inputs.to(device)
     outputs = model(inputs.unsqueeze(0))
@@ -102,8 +102,142 @@ def classify_lesions(model,image):
         dic[class_name] = class_prob
     # print(dic)
     return dic
+def classify_lesions_kor(model,image):
+    data_transforms = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    img = Image.fromarray(image).convert('RGB')
+    inputs = data_transforms(img)
+    inputs = inputs.to(device)
+    print(inputs.unsqueeze(0).shape)
+    outputs = model(inputs.unsqueeze(0))
+    probabilities = torch.nn.functional.softmax(outputs, dim=1)
+    top_p, top_class = probabilities.topk(5, dim=1)
+    result = list(zip([t.item() for t in top_p.squeeze().squeeze()], [t.item() for t in top_class.squeeze().squeeze()]))
+    result.sort(key=lambda x: x[1])
+    class_names = {
+        "0": "아토피 피부염",
+        "1": "지루성 피부염",
+        "2": "건선",
+        "3": "주사",
+        "4": "여드름",
+    }
+
+    classification_result=[None,None,None,None,None]
+    for i,data in enumerate(result):
+        class_prob, class_id = data
+        class_name = class_names[str(class_id)]
+        classification_result[i] = (class_name,class_prob)
+    classification_result.sort(key=lambda x:x[1],reverse=True)
+    return classification_result
+
+def export_onnx(model_path,image):
+    model_name = 'efficientnet-b7'
+    # image_size = EfficientNet.get_image_size(model_name)
+    # print('Image size: ', image_size)
+
+    # Load model
+    model = EfficientNet.from_pretrained(model_name, num_classes=5)
+    model.load_state_dict(torch.load(model_path))
+    model.set_swish(memory_efficient=False)
+    model.eval()
+    print('Model image size: ', model._global_params.image_size)
+
+    # Dummy input for ONNX
+    dummy_input = torch.randn(10, 3, 224, 224)
+
+    # Export with ONNX
+    torch.onnx.export(model, dummy_input, "efficientnet-b1.onnx", verbose=False)
+
+
+    ### dsdf
+    onnx_path = "efficientnet-b1.onnx"
+    onnx_model = onnx.load(onnx_path)
+
+    # onnx 모델의 정보를 layer 이름 : layer값 기준으로 저장합니다.
+    onnx_layers = dict()
+    for layer in onnx_model.graph.initializer:
+        onnx_layers[layer.name] = numpy_helper.to_array(layer)
+
+    # torch 모델의 정보를 layer 이름 : layer값 기준으로 저장합니다.
+    torch_layers = {}
+    for layer_name, layer_value in model.named_modules():
+        torch_layers[layer_name] = layer_value
+
+        # onnx와 torch 모델의 성분은 1:1 대응이 되지만 저장하는 기준이 다릅니다.
+    # onnx와 torch의 각 weight가 1:1 대응이 되는 성분만 필터합니다.
+    onnx_layers_set = set(onnx_layers.keys())
+    # onnx 모델의 각 layer에는 .weight가 suffix로 추가되어 있어서 문자열 비교 시 추가함
+    torch_layers_set = set([layer_name + ".weight" for layer_name in list(torch_layers.keys())])
+    filtered_onnx_layers = list(onnx_layers_set.intersection(torch_layers_set))
+
+    difference_flag = False
+    for layer_name in filtered_onnx_layers:
+        onnx_layer_name = layer_name
+        torch_layer_name = layer_name.replace(".weight", "")
+        onnx_weight = onnx_layers[onnx_layer_name]
+        torch_weight = torch_layers[torch_layer_name].weight.detach().numpy()
+        flag = compare_two_array(onnx_weight, torch_weight, onnx_layer_name)
+        difference_flag = True if flag == True else False
+
+    # ④ onnx 모델에 기존 torch 모델과 다른 weight가 있으면 전체 update를 한 후 새로 저장합니다.
+    if difference_flag:
+        print("update onnx weight from torch model.")
+        for index, layer in enumerate(onnx_model.graph.initializer):
+            layer_name = layer.name
+            if layer_name in filtered_onnx_layers:
+                onnx_layer_name = layer_name
+                torch_layer_name = layer_name.replace(".weight", "")
+                onnx_weight = onnx_layers[onnx_layer_name]
+                torch_weight = torch_layers[torch_layer_name].weight.detach().numpy()
+                copy_tensor = numpy_helper.from_array(torch_weight, onnx_layer_name)
+                onnx_model.graph.initializer[index].CopyFrom(copy_tensor)
+
+        print("save updated onnx model.")
+        onnx_new_path = os.path.dirname(os.path.abspath(onnx_path)) + os.sep + "updated_" + os.path.basename(onnx_path)
+        onnx.save(onnx_model, onnx_new_path)
+
+    # ⑤ 최종적으로 저장된 onnx 모델을 불러와서 shape 정보를 추가한 뒤 다시 저장합니다.
+    if difference_flag:
+        onnx.save(onnx.shape_inference.infer_shapes(onnx.load(onnx_new_path)), onnx_new_path)
+    else:
+        onnx.save(onnx.shape_inference.infer_shapes(onnx.load(onnx_path)), onnx_path)
+
+
+
+
+def check_onnx():
+    from onnx import shape_inference
+    path = "./efficientnet-b1.onnx"
+    onnx.save(onnx.shape_inference.infer_shapes(onnx.load(path)), path)
+
+def compare_two_array(actual, desired, layer_name, rtol=1e-7, atol=0):
+    # Reference : https://gaussian37.github.io/python-basic-numpy-snippets/
+    flag = False
+    try :
+        np.testing.assert_allclose(actual, desired, rtol=rtol, atol=atol)
+        print(layer_name + ": no difference.")
+    except AssertionError as msg:
+        print(layer_name + ": Error.")
+        print(msg)
+        flag = True
+    return flag
+# import onnxruntime
+def inferecne_onnx():
+    pass
+
+import numpy as np
+import torch.nn as nn
+import torch.onnx
+from torchvision import models
+import onnx
+from onnx import shape_inference
+import onnx.numpy_helper as numpy_helper
 
 if __name__ == '__main__':
+
     import skimage.draw
     model = load_model('./best_accuracy_88.85245901639345.pt')
     img_dir = '../test_images'
@@ -111,7 +245,10 @@ if __name__ == '__main__':
     for i in os.listdir(img_dir):
         print('*'*50)
         img_path = os.path.join(img_dir, i)
-        print(img_path)
+        # print(img_path)
         image = skimage.io.imread(img_path)
-        dic=classify_lesions(model,image)
+        dic=classify_lesions_kor(model,image)
         print('\tclassification results',dic)
+    #     export_onnx('./best_accuracy_88.85245901639345.pt',image)
+
+
