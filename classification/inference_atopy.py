@@ -1,15 +1,24 @@
 import numpy as np
 import torch.nn as nn
+import skimage.draw
 import matplotlib.pyplot as plt
 import os
 from efficientnet_pytorch import EfficientNet
 from torchvision import transforms, datasets
 from PIL import Image
 import torch
+import numpy as np
+import torch.nn as nn
+import torch.onnx
+from torchvision import models
+import onnx
+from onnx import shape_inference
+import onnx.numpy_helper as numpy_helper
+import cv2
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # set gpu
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # set gpu
-print(device)
+
 def imshow(inp, title=None):
     """Imshow for Tensor."""
     inp = inp.numpy().transpose((1, 2, 0))
@@ -21,8 +30,6 @@ def imshow(inp, title=None):
     if title is not None:
         plt.title(title)
     plt.pause(0.001)  # pause a bit so that plots are updated
-
-
 def inference(opt,device):
     model_name = opt.model_name
     model = EfficientNet.from_pretrained(model_name, num_classes=opt.num_classes)
@@ -65,7 +72,6 @@ def inference(opt,device):
         dic[class_name]=class_prob
     print(dic)
     return dic
-
 def load_model(model_path):
     model_name = 'efficientnet-b7'
     model = EfficientNet.from_pretrained(model_name, num_classes=5)
@@ -132,7 +138,6 @@ def classify_lesions_kor(model,image):
         classification_result[i] = (class_name,class_prob)
     classification_result.sort(key=lambda x:x[1],reverse=True)
     return classification_result
-
 def export_onnx(model_path,image):
     model_name = 'efficientnet-b7'
     # image_size = EfficientNet.get_image_size(model_name)
@@ -204,15 +209,10 @@ def export_onnx(model_path,image):
         onnx.save(onnx.shape_inference.infer_shapes(onnx.load(onnx_new_path)), onnx_new_path)
     else:
         onnx.save(onnx.shape_inference.infer_shapes(onnx.load(onnx_path)), onnx_path)
-
-
-
-
 def check_onnx():
     from onnx import shape_inference
     path = "./efficientnet-b1.onnx"
     onnx.save(onnx.shape_inference.infer_shapes(onnx.load(path)), path)
-
 def compare_two_array(actual, desired, layer_name, rtol=1e-7, atol=0):
     # Reference : https://gaussian37.github.io/python-basic-numpy-snippets/
     flag = False
@@ -224,20 +224,114 @@ def compare_two_array(actual, desired, layer_name, rtol=1e-7, atol=0):
         print(msg)
         flag = True
     return flag
-# import onnxruntime
-def inferecne_onnx():
-    pass
 
-import numpy as np
-import torch.nn as nn
-import torch.onnx
-from torchvision import models
-import onnx
-from onnx import shape_inference
-import onnx.numpy_helper as numpy_helper
+class lesion_classification_net:
+    def __init__(self, model_path='./best_accuracy_88.85245901639345.pt', model_name='efficientnet-b7'):
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        assert self.device == 'cuda', "cuda가 안되는데요?, classifiaction을 살펴보세요"
+        self.num_classes = 5
+        self.model = self.load_model(model_path=model_path, model_name=model_name, num_classes=self.num_classes)
+        self.data_transforms = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        self.class_names = {
+            "0": "아토피 피부염",
+            "1": "지루성 피부염",
+            "2": "건선",
+            "3": "주사",
+            "4": "여드름",
+        }
+
+    def load_model(self,model_path,model_name,num_classes):
+        model = EfficientNet.from_pretrained(model_name, num_classes=num_classes)
+        model.load_state_dict(torch.load(model_path))
+        model.eval()
+        return model.to(device)
+
+    def inference(self, image_path=None, image=None, display=False):
+        if (image_path != None):
+            image = skimage.io.imread(image_path)
+        else:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(image).convert('RGB')
+        inputs = self.data_transforms(image)
+        inputs = inputs.to(device)
+        outputs = self.model(inputs.unsqueeze(0))
+        probabilities = torch.nn.functional.softmax(outputs, dim=1)
+        top_p, top_class = probabilities.topk(5, dim=1)
+        result = list(
+            zip([t.item() for t in top_p.squeeze().squeeze()], [t.item() for t in top_class.squeeze().squeeze()]))
+        result.sort(key=lambda x: x[1])
+
+        classification_result = [None, None, None, None, None]
+        for i, data in enumerate(result):
+            class_prob, class_id = data
+            class_name = self.class_names[str(class_id)]
+            classification_result[i] = (class_name, class_prob)
+        classification_result.sort(key=lambda x: x[1], reverse=True)
+        if (display):
+            print(classification_result)
+        return classification_result
+
+class classification_net:
+    def __init__(self, Config):
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.Config = Config
+        self.Config.num_classes = len(self.Config.class_names)
+        self.model = self.__load_model()
+        self.data_transforms = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+    def __load_model(self):
+        model = EfficientNet.from_pretrained(self.Config.model_name, num_classes=self.Config.num_classes)
+        model.load_state_dict(torch.load(self.Config.model_path))
+        model.eval()
+        return model.to(device)
+
+    def inference(self, image_path=None, image=None, verbose=False):
+        if (image_path != None):
+            image = skimage.io.imread(image_path)
+        else:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(image).convert('RGB')
+        inputs = self.data_transforms(image)
+        inputs = inputs.to(device)
+        outputs = self.model(inputs.unsqueeze(0))
+        probabilities = torch.nn.functional.softmax(outputs, dim=1)
+        top_p, top_class = probabilities.topk(self.Config.num_classes, dim=1)
+        result = list(
+            zip([t.item() for t in top_p.squeeze().squeeze()], [t.item() for t in top_class.squeeze().squeeze()]))
+        result.sort(key=lambda x: x[1])
+
+        classification_result = [None for _ in range(self.Config.num_classes)]
+        for i, data in enumerate(result):
+            class_prob, class_id = data
+            class_name = self.Config.class_names[str(class_id).zfill(3)]
+            classification_result[i] = (class_name, class_prob)
+        # print(classification_result)
+        classification_result.sort(key=lambda x: x[1], reverse=True)
+        if (self.Config.verbose):
+            print(classification_result)
+
+        return classification_result[:self.Config.topk]
+
+
+
+
 
 if __name__ == '__main__':
-
+    # cl_net=lesion_classification_net()
+    # import cv2
+    # img=cv2.imread('../test_images/rosacea.jpg')
+    # cl_net.inference(image_path='../test_images/rosacea.jpg',display=True)
+    # cl_net.inference(image=img,display=True)
+    # cv2.waitKey(0)
+    #
     import skimage.draw
     model = load_model('./best_accuracy_88.85245901639345.pt')
     img_dir = '../test_images'
